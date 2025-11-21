@@ -1,0 +1,284 @@
+---
+############################################################
+title: "Ejemplo Didáctico de Propensity Score"
+author: "Mariana Vaena - marianavaena@gmail.com"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+############################################################
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+# Introducción
+
+Este documento muestra diferentes formas de utilizar el **Propensity Score (PS)** con una base ficticia de pacientes tratados y no tratados.
+
+Incluye:
+
+1. **Ajuste por PS como covariable**  
+2. **Matching por PS**  
+3. **Ponderación IPTW (Inverse Probability of Treatment Weighting)**  
+
+Variables disponibles:
+
+- `tratamiento` (dicotómica, 0/1)  
+- `mortalidad` (dicotómica, 0/1)  
+- `edad`  (contínua)
+- `sexo` (dicotómica, 0/1)  
+- `charlson`  (contínua)
+- `sofa_total`  (contínua)
+
+---
+
+# Preparación: paquetes y datos
+
+Paquetes
+```{r}
+library(tidyverse)
+library(tableone)
+library(MatchIt)
+library(cobalt)
+library(survey)
+library(broom)
+```
+
+Carga de la base de datos
+Ajustar la ruta al archivo CSV según tu repositorio
+
+```{r}
+datos <- read.csv("prueba.csv")
+```
+
+Revisar siempre estar usando las variables con formatos correctos
+
+```{r}
+datos <- datos %>% 
+  mutate(
+    tratamiento = as.factor(tratamiento),
+    mortalidad  = as.factor(mortalidad),
+    sexo        = as.factor(sexo)
+  )
+```
+
+---
+
+# Tabla 1 – Comparación basal
+
+```{r}
+vars <- c("edad", "sexo", "charlson", "sofa_total")
+
+tab1 <- CreateTableOne(
+  vars = vars,
+  strata = "tratamiento",
+  data = datos,
+  factorVars = c("sexo")
+)
+
+tab1
+```
+
+**Interpretación**
+
+- La edad media y los puntajes de gravedad son mayores en tratados.  
+- Sexo no está perfectamente balanceado.  
+- **Existe desequilibrio basal → se necesita ajustar.**
+
+---
+
+# Modelo crudo (sin ajuste)
+
+```{r}
+mod_crudo <- glm(
+  mortalidad ~ tratamiento,
+  data = datos,
+  family = binomial
+)
+
+tidy(mod_crudo, exponentiate = TRUE, conf.int = TRUE)
+```
+
+**Interpretación**
+
+- Este modelo estima el efecto crudo del tratamiento sobre la mortalidad.
+- El OR crudo del tratamiento sobre mortalidad no es significativo.  
+- Puede deberse a **sesgo de indicación**: si los más graves tienen mas chances de recibir el tratamiento, pero a la vez los mas graves tienen mas mortalidad, puede atenuarse el verdadero efecto del tratamiento sobre la mortalidad
+
+---
+
+# Estimación del Propensity Score
+
+Para la estimación, también hacemos un modelo de regresión logística
+
+Pero esta vez, la variable dependiente del modelo es el tratamiento. 
+
+```{r}
+ps_model <- glm(
+  tratamiento ~ edad + sexo + charlson + sofa_total,
+  data = datos,
+  family = binomial
+)
+
+datos$ps <- predict(ps_model, type = "response")
+summary(datos$ps)
+```
+
+Distribución del PS por grupo
+
+```{r}
+ggplot(datos, aes(ps, fill = tratamiento)) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Distribución del Propensity Score por grupo",
+    fill = "Tratamiento",
+    x = "Propensity Score"
+  )
+```
+
+**Interpretación**
+
+- Se observa solapamiento aceptable entre grupos.
+- Sin embargo, los tratados tienden a tener valores más altos de PS, consistente con mayor carga de enfermedad.
+- Esto permite aplicar métodos basados en PS.
+
+---
+
+## **Uso 1 — Ajuste por PS como covariable**
+
+```{r}
+mod_ps_cov <- glm(
+  mortalidad ~ tratamiento + ps,
+  data = datos,
+  family = binomial
+)
+
+tidy(mod_ps_cov, exponentiate = TRUE, conf.int = TRUE)
+```
+
+**Comentarios metodológicos**
+
+- Resume múltiples confusores en una sola variable → simplifica el modelo.  
+- Estima un **efecto condicional**, no marginal.  
+
+**Interpretación**
+
+- Tras ajustar por el PS, el OR del tratamiento cambia notablemente: esto indica que el modelo crudo sufría confusión
+- En esta base, el tratamiento parece asociado a menor mortalidad después del ajuste, lo cual es consistente con una minimización del sesgo de indicación.
+
+---
+
+## **Uso 2 — Matching por Propensity Score**
+
+```{r}
+mod.match <- matchit(
+  tratamiento ~ edad + sexo + charlson + sofa_total,
+  data = datos,
+  method = "nearest",
+  distance = "logit",
+  ratio = 1,
+  caliper = 0.05
+)
+
+summary(mod.match)
+```
+
+Crear base emparejada
+
+```{r}
+
+datos_match <- match.data(mod.match)
+```
+
+Calcular el OR
+
+```{r}
+mod_ps_match <- glm(
+  mortalidad ~ tratamiento,
+  data = datos_match,
+  family = binomial
+)
+tidy(mod_ps_match, exponentiate = TRUE, conf.int = TRUE)
+```
+
+**Interpretación**
+
+- El matching crea una pseudo-población donde la distribución de confusores debería ser similar entre tratados y no tratados.
+- El estimando típico es el ATT (Average Treatment effect on the Treated).
+- En esta base, el OR en la muestra emparejada muestra una reducción en la mortalidad del tratamiento
+- Sin embargo, pierde poder estadístico por reducción de muestra. Esto ocurre porque el matching 1:1 descarta observaciones sin pareja válida
+
+---
+
+## **Uso 3 — IPTW (Inverse Probability of Treatment Weighting)***
+
+Primero se deben calcular los pesos
+
+```{r}
+datos <- datos %>%
+  mutate(
+    tratamiento_num = as.numeric(as.character(tratamiento)),
+    mortalidad_num  = as.numeric(as.character(mortalidad)),
+    iptw = ifelse(tratamiento_num == 1,
+                  1 / ps,
+                  1 / (1 - ps))
+  )
+
+summary(datos$iptw)
+```
+! ojo, vemos que hay valores extremos de hasta 12. Algunos autores recomiendan truncamiento de pesos extremos.
+
+Revisar el balance luego de ponderar
+
+```{r}
+bal.tab(
+  x = tratamiento ~ edad + sexo + charlson + sofa_total,
+  data = datos,
+  weights = datos$iptw,
+  method = "weighting"
+)
+```
+
+```{r}
+love.plot(
+  x = tratamiento ~ edad + sexo + charlson + sofa_total,
+  data = datos,
+  weights = datos$iptw,
+  stats = "mean.diffs",
+  threshold = 0.1,
+  abs = TRUE,
+  var.order = "unadjusted"
+)
+```
+
+Modelo ponderado (ATE)
+
+```{r}
+design_iptw <- svydesign(
+  ids = ~1,
+  weights = ~iptw,
+  data = datos
+)
+
+mod_iptw <- svyglm(
+  mortalidad_num ~ tratamiento_num,
+  design = design_iptw,
+  family = quasibinomial()
+)
+
+tidy(mod_iptw, exponentiate = TRUE, conf.int = TRUE)
+```
+
+**Interpretación**
+
+ - Los pesos producen una "pseudo-población" donde la distribución de confusores es equilibrada.
+ - Tras IPTW, el balance de las medias estandarizadas de las variables confusoras mejora notablemente.
+ - En esta base, el efecto del tratamiento se hace más evidente y estadísticamente significativo.
+ - IPTW tiende a conservar mayor n que el matching y estimar el ATE.
