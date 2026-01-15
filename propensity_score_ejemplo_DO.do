@@ -110,9 +110,9 @@ logistic mortalidad tratamiento ps
 * Para el matching vamos a usar psmatch2 (comando de usuario):
 *   ssc install psmatch2, replace
 *
-* Matching 1:1, sin reemplazo, logit, caliper opcional (0.05)
+* Matching 1:1, sin reemplazo, logit, caliper (0.2)
 psmatch2 tratamiento edad sexo charlson sofa_total,      ///
-    outcome(mortalidad) logit neighbor(1) caliper(0.05)
+    outcome(mortalidad) logit neighbor(1) caliper(0.2)
 
 * psmatch2 genera una serie de variables auxiliares:
 *   _weight: peso de cada observación para análisis posteriores
@@ -173,4 +173,5 @@ logistic mortalidad tratamiento [pw = iptw], vce(robust)
 
 *******************************************************
 * Fin del ejemplo de Propensity Score
+
 *******************************************************
